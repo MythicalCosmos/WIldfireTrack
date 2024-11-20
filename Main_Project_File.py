@@ -1,5 +1,6 @@
 import tkinter as tk
 from tkinter import messagebox
+from tkinter import ttk
 import pandas as pd
 
 class WildfireTracker:
@@ -27,6 +28,13 @@ class WildfireTracker:
         self.submit_button = tk.Button(root, text="Submit", command=self.submit_data)
         self.submit_button.pack()
 
+        # Treeview to display data
+        self.tree = ttk.Treeview(root, columns=("Location", "Date", "Severity"), show='headings')
+        self.tree.heading("Location", text="Location")
+        self.tree.heading("Date", text="Date")
+        self.tree.heading("Severity", text="Severity")
+        self.tree.pack()
+
         # Load existing data
         self.load_data()
 
@@ -39,6 +47,10 @@ class WildfireTracker:
             # Save data to CSV
             new_data = pd.DataFrame([[location, date, severity]], columns=["Location", "Date", "Severity"])
             new_data.to_csv("wildfires.csv", mode='a', header=False, index=False)
+
+            # Insert data into treeview
+            self.tree.insert("", tk.END, values=(location, date, severity))
+
             messagebox.showinfo("Success", "Data submitted successfully!")
             self.clear_entries()
         else:
@@ -47,7 +59,8 @@ class WildfireTracker:
     def load_data(self):
         try:
             self.data = pd.read_csv("wildfires.csv")
-            print(self.data)  # You can replace this with a function to display data in the GUI
+            for index, row in self.data.iterrows():
+                self.tree.insert("", tk.END, values=(row["Location"], row["Date"], row["Severity"]))
         except FileNotFoundError:
             self.data = pd.DataFrame(columns=["Location", "Date", "Severity"])
 
