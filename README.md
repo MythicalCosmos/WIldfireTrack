@@ -1,2 +1,2 @@
-# WIldfireTrack
-Tracks Wildfire (shitty code don't use for a competition but it will work)
+#Wild Fire Tracking
+Tracks wild fires based on online data or a .cvs file 
