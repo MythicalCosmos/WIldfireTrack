@@ -1,0 +1,225 @@
+import psutil
+import tkinter as tk
+from tkinter import ttk
+import requests
+import pandas as pd
+import io
+from geopy.geocoders import Nominatim
+from geopy.exc import GeocoderTimedOut
+import tkintermapview
+import math
+import sys
+from concurrent.futures import ThreadPoolExecutor
+from tkinter.filedialog import askopenfilename
+
+# Configuration settings
+API_KEY = '618d86618ae931ebab8598370ac3a8f9'
+BASE_URL = 'https://firms.modaps.eosdis.nasa.gov/api/area/csv'
+DATA_SOURCE = 'VIIRS_NOAA20_NRT'
+REGION = 'world'
+TIME_PERIOD = '10'  # Last 24 hours
+WINDOW_TITLE = "Wildfire Tracking Program"
+WINDOW_WIDTH = 1200
+WINDOW_HEIGHT = 800
+PADDING = 10
+MEMORY_LIMIT_MB = 3072
+R = 6371  # Radius of Earth in kilometers
+
+def check_memory_limit():
+    """Check if the memory usage exceeds the limit and terminate if it does."""
+    process = psutil.Process()
+    memory_usage = process.memory_info().rss / (1024 * 1024)  # Convert bytes to MB
+    if memory_usage > MEMORY_LIMIT_MB:
+        print(f"Memory limit exceeded: {memory_usage:.2f} MB. Terminating the application.")
+        sys.exit(1)
+
+def haversine(lat1, lon1, lat2, lon2):
+    """Calculate the distance between two points (lat, lon) on Earth using Haversine formula."""
+    lat1, lon1, lat2, lon2 = map(math.radians, [lat1, lon1, lat2, lon2])
+    dlat = lat2 - lat1
+    dlon = lon2 - lon1
+    a = math.sin(dlat / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon / 2) ** 2
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+    return R * c
+
+class WildfireTracker:
+    def __init__(self, root):
+        """Initialize the application UI."""
+        self.root = root
+        self.root.title(WINDOW_TITLE)
+        self.root.geometry(f"{WINDOW_WIDTH}x{WINDOW_HEIGHT}")
+        self.geolocator = Nominatim(user_agent="wildfire_tracker")
+        self.user_location = (0, 0)
+        self.radius_km = 100  # Default radius
+        self.filename = None
+        self.loaded_data = None
+        self.memory_check_id = None
+        self.executor = ThreadPoolExecutor(max_workers=4)
+        self.setup_ui()
+        self.detect_current_location()
+
+    def setup_ui(self):
+        """Set up the user interface elements."""
+        self.create_menu()
+        main_frame = ttk.Frame(self.root, padding=PADDING)
+        main_frame.pack(fill=tk.BOTH, expand=True)
+        ttk.Label(main_frame, text="Global Wildfire Tracking System", font=('Helvetica', 16, 'bold')).pack(pady=PADDING)
+        location_frame = ttk.Frame(main_frame)
+        location_frame.pack(pady=PADDING)
+        ttk.Label(location_frame, text="Enter City and Country (e.g., 'Paris, France'):").pack(side=tk.LEFT, padx=5)
+        self.location_entry = ttk.Entry(location_frame, width=30)
+        self.location_entry.pack(side=tk.LEFT, padx=5)
+        ttk.Button(location_frame, text="Set Location", command=self.set_location).pack(side=tk.LEFT, padx=5)
+        ttk.Button(main_frame, text="Fetch Latest Wildfire Data", command=self.fetch_data).pack(pady=PADDING)
+        ttk.Button(main_frame, text="Load CSV Data", command=self.load_csv_data).pack(pady=PADDING)
+        ttk.Button(main_frame, text="Start Reading CSV Data", command=self.start_reading_csv_data).pack(pady=PADDING)
+        self.status_label = ttk.Label(main_frame, text="Detecting your current location...", font=('Helvetica', 10))
+        self.status_label.pack(pady=PADDING)
+        map_frame = ttk.Frame(main_frame)
+        map_frame.pack(fill=tk.BOTH, expand=True)
+        self.map_widget = tkintermapview.TkinterMapView(map_frame, width=800, height=600)
+        self.map_widget.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.text_box = tk.Text(map_frame, height=30, width=40)
+        self.text_box.pack(side=tk.RIGHT, fill=tk.Y, padx=PADDING)
+
+    def create_menu(self):
+        """Create an Options menu to configure the application."""
+        menu_bar = tk.Menu(self.root)
+        self.root.config(menu=menu_bar)
+        options_menu = tk.Menu(menu_bar, tearoff=0)
+        options_menu.add_command(label="Set Tracking Radius", command=self.set_radius)
+        menu_bar.add_cascade(label="Options", menu=options_menu)
+
+    def set_radius(self):
+        """Allow the user to set a new radius for wildfire detection."""
+        radius_window = tk.Toplevel(self.root)
+        radius_window.title("Set Tracking Radius")
+        ttk.Label(radius_window, text="Enter new radius in kilometers:").pack(pady=PADDING)
+        radius_entry = ttk.Entry(radius_window, width=20)
+        radius_entry.pack(pady=PADDING)
+
+        def update_radius():
+            try:
+                new_radius = int(radius_entry.get())
+                if new_radius <= 0:
+                    raise ValueError("Radius must be a positive integer.")
+                self.radius_km = new_radius
+                self.status_label.config(text=f"Tracking radius updated to {self.radius_km} km.")
+                radius_window.destroy()
+            except ValueError as e:
+                self.status_label.config(text=f"Invalid input: {e}")
+
+        ttk.Button(radius_window, text="Set Radius", command=update_radius).pack(pady=PADDING)
+
+    def detect_current_location(self):
+        """Detect user's current location based on their IP."""
+        try:
+            response = requests.get("https://ipapi.co/json/", timeout=10)
+            response.raise_for_status()
+            location_data = response.json()
+            latitude = location_data.get("latitude")
+            longitude = location_data.get("longitude")
+            if latitude and longitude:
+                self.user_location = (latitude, longitude)
+                self.map_widget.set_position(latitude, longitude)
+                self.map_widget.set_zoom(10)
+                self.status_label.config(text=f"Location detected: {location_data.get('city')}, {location_data.get('country_name')}")
+            else:
+                self.status_label.config(text="Unable to detect current location.")
+        except Exception as e:
+            self.status_label.config(text=f"Error detecting location: {e}")
+
+    def set_location(self):
+        """Set the user's location based on input."""
+        location_input = self.location_entry.get().strip()
+        if not location_input:
+            self.status_label.config(text="Please enter a city and country.")
+            return
+        try:
+            location = self.geolocator.geocode(location_input, timeout=10)
+            if location:
+                self.user_location = (location.latitude, location.longitude)
+                self.map_widget.set_position(location.latitude, location.longitude)
+                self.map_widget.set_zoom(10)
+                self.status_label.config(text=f"Location set to: {location_input}")
+            else:
+                self.status_label.config(text="Location not found. Try 'City, Country'.")
+        except GeocoderTimedOut:
+            self.status_label.config(text="Geocoding service timed out. Try again.")
+        except Exception as e:
+            self.status_label.config(text=f"Error setting location: {e}")
+
+    def fetch_data(self):
+        """Fetch wildfire data from the API in a separate thread."""
+        self.status_label.config(text="Fetching data...")
+        self.executor.submit(self.fetch_data_task)
+
+    def fetch_data_task(self):
+        """Task to fetch and process wildfire data."""
+        try:
+            url = f'{BASE_URL}/{API_KEY}/{DATA_SOURCE}/{REGION}/{TIME_PERIOD}?region=1'
+            response = requests.get(url, timeout=10)
+            response.raise_for_status()
+            data = pd.read_csv(io.StringIO(response.text))
+            filtered_data = self.filter_wildfires_within_radius(data)
+            self.root.after(0, lambda: self.display_data(filtered_data))
+            self.root.after(0, lambda: self.show_results(filtered_data))
+        except Exception as e:
+            self.root.after(0, lambda: self.show_error(f"Error fetching data: {e}"))
+
+    def show_results(self, data):
+        """Display results in the text box."""
+        self.text_box.delete(1.0, tk.END)
+        if data.empty:
+            self.text_box.insert(tk.END, "No wildfires found within the specified radius.")
+        else:
+            for _, row in data.iterrows():
+                self.text_box.insert(tk.END, f"Location: ({row['latitude']}, {row['longitude']}), Date: {row['acq_date']}\n")
+
+    def display_data(self, data):
+        """Display wildfire data on the map."""
+        self.map_widget.delete_all_marker()
+        if data.empty:
+            self.status_label.config(text="No wildfires found within the specified radius.")
+        else:
+            for _, row in data.iterrows():
+                self.map_widget.set_marker(row['latitude'], row['longitude'], text=f"Fire detected!\nDate: {row['acq_date']}", marker_color_circle="red", marker_color_outside="red")
+            self.status_label.config(text="Wildfire data displayed on the map.")
+
+    def load_csv_data(self):
+        """Allow the user to load a CSV file manually."""
+        self.filename = askopenfilename(filetypes=[("CSV files", "*.csv")])
+        if self.filename:
+            self.status_label.config(text=f"Loaded file: {self.filename}")
+            self.loaded_data = pd.read_csv(self.filename)
+
+    def start_reading_csv_data(self):
+        """Start processing the loaded CSV data."""
+        if self.loaded_data is not None:
+            filtered_data = self.filter_wildfires_within_radius(self.loaded_data)
+            self.show_results(filtered_data)
+            self.display_data(filtered_data)
+        else:
+            self.status_label.config(text="No CSV data loaded.")
+
+    def filter_wildfires_within_radius(self, data):
+        """Filter wildfires within the radius."""
+        if self.user_location == (0, 0):
+            self.status_label.config(text="User location not set.")
+            return pd.DataFrame()
+        filtered_data = []
+        for _, row in data.iterrows():
+            distance = haversine(self.user_location[0], self.user_location[1], row['latitude'], row['longitude'])
+            if distance <= self.radius_km:
+                filtered_data.append(row)
+        return pd.DataFrame(filtered_data)
+
+    def show_error(self, message):
+        """Display an error message."""
+        self.status_label.config(text=message)
+
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = WildfireTracker(root)
+    root.mainloop()
